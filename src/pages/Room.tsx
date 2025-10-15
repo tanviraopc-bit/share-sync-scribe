@@ -1,10 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { toast } from "sonner";
-import { Copy, Users, Home } from "lucide-react";
+import { Copy, Users, Home, Loader2 } from "lucide-react";
 
 const Room = () => {
   const { roomCode } = useParams();
@@ -12,6 +12,9 @@ const Room = () => {
   const [content, setContent] = useState("");
   const [roomId, setRoomId] = useState<string | null>(null);
   const [onlineUsers, setOnlineUsers] = useState(0);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const updateTimeoutRef = useRef<NodeJS.Timeout>();
 
   useEffect(() => {
     if (!roomCode) {
@@ -20,20 +23,35 @@ const Room = () => {
     }
 
     const initRoom = async () => {
-      const { data, error } = await supabase
-        .from("rooms")
-        .select("*")
-        .eq("room_code", roomCode)
-        .single();
+      try {
+        const { data, error } = await supabase
+          .from("rooms")
+          .select("*")
+          .eq("room_code", roomCode)
+          .maybeSingle();
 
-      if (error || !data) {
-        toast.error("Room not found");
+        if (error) {
+          console.error("Room fetch error:", error);
+          toast.error("Failed to load room");
+          navigate("/");
+          return;
+        }
+
+        if (!data) {
+          toast.error("Room not found");
+          navigate("/");
+          return;
+        }
+
+        setRoomId(data.id);
+        setContent(data.content || "");
+      } catch (err) {
+        console.error("Unexpected error loading room:", err);
+        toast.error("Failed to load room");
         navigate("/");
-        return;
+      } finally {
+        setIsLoading(false);
       }
-
-      setRoomId(data.id);
-      setContent(data.content || "");
     };
 
     initRoom();
@@ -42,7 +60,6 @@ const Room = () => {
   useEffect(() => {
     if (!roomId) return;
 
-    // Subscribe to room changes
     const channel = supabase
       .channel(`room:${roomId}`)
       .on(
@@ -55,6 +72,7 @@ const Room = () => {
         },
         (payload: any) => {
           setContent(payload.new.content || "");
+          setIsSyncing(false);
         }
       )
       .on("presence", { event: "sync" }, () => {
@@ -69,22 +87,40 @@ const Room = () => {
 
     return () => {
       supabase.removeChannel(channel);
+      if (updateTimeoutRef.current) {
+        clearTimeout(updateTimeoutRef.current);
+      }
     };
   }, [roomId]);
 
-  const handleContentChange = async (newContent: string) => {
+  const handleContentChange = (newContent: string) => {
     setContent(newContent);
+    setIsSyncing(true);
 
     if (!roomId) return;
 
-    const { error } = await supabase
-      .from("rooms")
-      .update({ content: newContent })
-      .eq("id", roomId);
-
-    if (error) {
-      toast.error("Failed to update content");
+    if (updateTimeoutRef.current) {
+      clearTimeout(updateTimeoutRef.current);
     }
+
+    updateTimeoutRef.current = setTimeout(async () => {
+      try {
+        const { error } = await supabase
+          .from("rooms")
+          .update({ content: newContent })
+          .eq("id", roomId);
+
+        if (error) {
+          console.error("Update error:", error);
+          toast.error("Failed to sync changes");
+          setIsSyncing(false);
+        }
+      } catch (err) {
+        console.error("Unexpected sync error:", err);
+        toast.error("Failed to sync changes");
+        setIsSyncing(false);
+      }
+    }, 300);
   };
 
   const copyRoomCode = () => {
@@ -95,9 +131,24 @@ const Room = () => {
   };
 
   const copyContent = () => {
+    if (!content) {
+      toast.error("No content to copy");
+      return;
+    }
     navigator.clipboard.writeText(content);
     toast.success("Content copied!");
   };
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <div className="flex flex-col items-center gap-4">
+          <Loader2 className="h-8 w-8 animate-spin text-primary" />
+          <p className="text-muted-foreground">Loading room...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex flex-col items-center justify-center p-4">
@@ -135,8 +186,16 @@ const Room = () => {
         {/* Content Editor */}
         <div className="glass-effect rounded-2xl p-6 space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold">Shared Content</h2>
-            <Button variant="outline" size="sm" onClick={copyContent}>
+            <div className="flex items-center gap-2">
+              <h2 className="text-lg font-semibold">Shared Content</h2>
+              {isSyncing && (
+                <span className="text-xs text-muted-foreground flex items-center gap-1">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  Syncing...
+                </span>
+              )}
+            </div>
+            <Button variant="outline" size="sm" onClick={copyContent} disabled={!content}>
               <Copy className="h-4 w-4" />
               Copy All
             </Button>
